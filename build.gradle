@@ -2,6 +2,7 @@ plugins {
 	id 'java'
 	id 'distribution'
 	id 'org.hidetake.ssh' version '2.10.1'
+	id 'com.google.protobuf' version '0.9.4'  // Added for gRPC
 }
 
 group 'BFT-SMaRt'
@@ -169,6 +170,9 @@ tasks.withType(Javadoc) {
 	options.addStringOption('charSet', 'UTF-8')
 }
 
+def grpcVersion = '1.58.0'
+def protobufVersion = '3.24.0'
+
 dependencies {
 	implementation fileTree('lib'){include '*.jar'}
 	// https://mvnrepository.com/artifact/org.bouncycastle/bcpkix-jdk15on
@@ -191,4 +195,38 @@ dependencies {
 
 	// https://mvnrepository.com/artifact/org.slf4j/slf4j-api
 	implementation 'org.slf4j:slf4j-api:1.7.32'
+
+	// gRPC dependencies
+    implementation "io.grpc:grpc-netty-shaded:${grpcVersion}"
+    implementation "io.grpc:grpc-protobuf:${grpcVersion}"
+    implementation "io.grpc:grpc-stub:${grpcVersion}"
+    implementation "com.google.protobuf:protobuf-java:${protobufVersion}"
+    
+    compileOnly 'org.apache.tomcat:annotations-api:6.0.53' // necessary for Java 9+
+}
+
+protobuf {
+    protoc {
+        artifact = "com.google.protobuf:protoc:${protobufVersion}"
+    }
+    plugins {
+        grpc {
+            artifact = "io.grpc:protoc-gen-grpc-java:${grpcVersion}"
+        }
+    }
+    generateProtoTasks {
+        all()*.plugins {
+            grpc {}
+        }
+    }
+}
+
+// This ensures the proto-generated sources are on the classpath
+sourceSets {
+    main {
+        java {
+            srcDir 'build/generated/source/proto/main/grpc'
+            srcDir 'build/generated/source/proto/main/java'
+        }
+    }
 }

@@ -641,4 +641,12 @@ public class TOMConfiguration extends Configuration {
 		return enabledCiphers;
 	}
 
+    public synchronized void setMaxBatchSize(int newSize) {
+        this.maxBatchSize = newSize;
+    }
+    
+    public synchronized void setBatchTimeout(int newTimeout) {
+        this.batchTimeout = newTimeout;
+    }
+
 }

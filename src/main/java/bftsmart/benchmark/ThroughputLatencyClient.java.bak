@@ -1,0 +1,151 @@
+package bftsmart.benchmark;
+
+import bftsmart.tests.util.Operation;
+import bftsmart.tom.ServiceProxy;
+
+import java.nio.ByteBuffer;
+import java.util.Arrays;
+import java.util.concurrent.CountDownLatch;
+
+/**
+ * 吞吐量和延迟测试的客户端实现。
+ * 可以创建多个客户端线程，每个线程可以发送指定数量的请求。
+ */
+public class ThroughputLatencyClient {
+    // 静态变量用于所有客户端线程共享
+    private static int initialClientId;         // 起始客户端ID
+    private static byte[] data;                 // 公共数据
+    private static byte[] serializedReadRequest;  // 预生成的读请求
+    private static byte[] serializedWriteRequest; // 预生成的写请求
+
+    public static void main(String[] args) throws InterruptedException {
+        if (args.length != 7) {
+            System.out.println("USAGE: bftsmart.benchmark.ThroughputLatencyClient " +
+                    "<initial client id> " +          // 起始客户端ID
+                    "<num clients> " +                // 要创建的客户端数量
+                    "<number of operations per client> " + // 每个客户端的操作数
+                    "<request size> " +               // 请求大小（字节）
+                    "<isWrite?> " +                   // 是否为写操作
+                    "<use hashed response> " +        // 是否使用哈希响应
+                    "<measurement leader?>");         // 是否为测量主节点
+            System.exit(-1);
+        }
+
+        // 解析命令行参数
+        initialClientId = Integer.parseInt(args[0]);
+        int numClients = Integer.parseInt(args[1]);
+        int numOperationsPerClient = Integer.parseInt(args[2]);
+        int requestSize = Integer.parseInt(args[3]);
+        boolean isWrite = Boolean.parseBoolean(args[4]);
+        boolean useHashedResponse = Boolean.parseBoolean(args[5]);
+        boolean measurementLeader = Boolean.parseBoolean(args[6]);
+
+        // 用于同步所有客户端线程启动的闩锁
+        CountDownLatch latch = new CountDownLatch(numClients);
+        Client[] clients = new Client[numClients];
+
+        // 准备请求数据
+        data = new byte[requestSize];
+        for (int i = 0; i < requestSize; i++) {
+            data[i] = (byte) i;
+        }
+
+        // 预先构建写请求（PUT操作）
+        // 格式：[操作类型(1字节) | 请求大小(4字节) | 数据(requestSize字节)]
+        ByteBuffer writeBuffer = ByteBuffer.allocate(1 + Integer.BYTES + requestSize);
+        writeBuffer.put((byte) Operation.PUT.ordinal());
+        writeBuffer.putInt(requestSize);
+        writeBuffer.put(data);
+        serializedWriteRequest = writeBuffer.array();
+
+        // 预先构建读请求（GET操作）
+        // 格式：[操作类型(1字节)]
+        ByteBuffer readBuffer = ByteBuffer.allocate(1);
+        readBuffer.put((byte) Operation.GET.ordinal());
+        serializedReadRequest = readBuffer.array();
+
+        // 创建并启动所有客户端线程
+        for (int i = 0; i < numClients; i++) {
+            clients[i] = new Client(initialClientId + i,
+                    numOperationsPerClient, isWrite, useHashedResponse, measurementLeader, latch);
+            clients[i].start();
+            Thread.sleep(10); // 每个客户端间隔10ms启动，避免瞬时压力过大
+        }
+
+        // 等待所有客户端就绪
+        latch.await();
+        System.out.println("Executing experiment");
+    }
+
+    /**
+     * 客户端线程类，负责发送请求并测量延迟
+     */
+    private static class Client extends Thread {
+        private final int clientId;              // 客户端ID
+        private final int numOperations;         // 需要执行的操作数
+        private final boolean isWrite;           // 是否为写操作
+        private final ServiceProxy proxy;        // 与服务器通信的代理
+        private final CountDownLatch latch;      // 启动同步闩锁
+        private final boolean useHashedResponse; // 是否使用哈希响应
+        private final boolean measurementLeader; // 是否为测量主节点
+
+        public Client(int clientId, int numOperations, boolean isWrite, boolean useHashedResponse,
+                     boolean measurementLeader, CountDownLatch latch) {
+            this.clientId = clientId;
+            this.numOperations = numOperations;
+            this.isWrite = isWrite;
+            this.useHashedResponse = useHashedResponse;
+            this.measurementLeader = measurementLeader;
+            this.proxy = new ServiceProxy(clientId);
+            this.latch = latch;
+        }
+
+        @Override
+        public void run() {
+            try {
+                latch.countDown(); // 通知客户端已就绪
+                
+                // 执行指定数量的操作
+                for (int i = 0; i < numOperations; i++) {
+                    long t1, t2, latency;
+                    byte[] response;
+
+                    // 记录请求开始时间
+                    t1 = System.nanoTime();
+
+                    // 根据操作类型发送请求
+                    if (isWrite) {
+                        if (useHashedResponse) {
+                            response = proxy.invokeOrderedHashed(serializedWriteRequest);
+                        } else {
+                            response = proxy.invokeOrdered(serializedWriteRequest);
+                        }
+                    } else {
+                        if (useHashedResponse) {
+                            response = proxy.invokeUnorderedHashed(serializedReadRequest);
+                        } else {
+                            response = proxy.invokeUnordered(serializedReadRequest);
+                        }
+                    }
+
+                    // 记录请求结束时间并计算延迟
+                    t2 = System.nanoTime();
+                    latency = t2 - t1;
+
+                    // 如果是读操作，验证响应数据正确性
+                    if (!isWrite && !Arrays.equals(data, response)) {
+                        throw new IllegalStateException("The response is wrong (" + Arrays.toString(response) + ")");
+                    }
+
+                    // 如果是测量主节点，输出延迟信息
+                    if (initialClientId == clientId && measurementLeader) {
+                        System.out.println("M: " + latency);
+                    }
+                }
+            } finally {
+                // 确保关闭代理连接
+                proxy.close();
+            }
+        }
+    }
+}
