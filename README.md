@@ -1,3 +1,43 @@
+# New Setup Steps
+
+构建项目, rebuild 会清空build/local/rep0/的内容
+
+```
+./gradlew clean build installDist
+
+# 为4个服务器节点创建目录
+mkdir -p build/local/rep0
+mkdir -p build/local/rep1
+mkdir -p build/local/rep2
+mkdir -p build/local/rep3
+
+cp -r build/install/library/* build/local/rep0/
+cp -r build/install/library/* build/local/rep1/
+cp -r build/install/library/* build/local/rep2/
+cp -r build/install/library/* build/local/rep3/
+
+# 在rep0目录中
+cd build/local/rep0
+./smartrun.sh bftsmart.benchmark.ThroughputLatencyServer 0 1024
+
+# 在rep1目录中
+cd build/local/rep1
+./smartrun.sh bftsmart.benchmark.ThroughputLatencyServer 1 1024
+
+# 以此类推...
+```
+
+
+
+```
+# 发送大小在1KB到4KB之间，步长为1KB的递增请求
+./smartrun.sh bftsmart.benchmark.ThroughputLatencyClient 1001 1 1000 1024 4096 1024 true false true false
+
+# 发送大小在1KB到4KB之间随机的请求
+./smartrun.sh bftsmart.benchmark.ThroughputLatencyClient 1001 1 1000 1024 4096 1024 true false true true
+```
+
+
 # Byzantine Fault-Tolerant (BFT) State Machine Replication (SMaRt) v2.0
 
 This is a Byzantine fault-tolerant state machine replication project named BFT-SMaRt, a Java open source library maintained by the LASIGE Computer Science and Engineering Research Centre at the University of Lisbon.
