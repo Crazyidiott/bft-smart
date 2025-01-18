@@ -3,18 +3,11 @@
 构建项目, rebuild 会清空build/local/rep0/的内容
 
 ```
-./gradlew clean build installDist
+./rebuild.sh
 
-# 为4个服务器节点创建目录
-mkdir -p build/local/rep0
-mkdir -p build/local/rep1
-mkdir -p build/local/rep2
-mkdir -p build/local/rep3
 
-cp -r build/install/library/* build/local/rep0/
-cp -r build/install/library/* build/local/rep1/
-cp -r build/install/library/* build/local/rep2/
-cp -r build/install/library/* build/local/rep3/
+#在train目录下
+python trainer.py
 
 # 在rep0目录中
 cd build/local/rep0

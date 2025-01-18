@@ -8,14 +8,20 @@ import bftsmart.monitor.grpc.*;
 import bftsmart.reconfiguration.util.TOMConfiguration;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
+import io.grpc.stub.StreamObserver;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.nio.ByteBuffer;
 import java.util.HashSet;
 import java.util.Set;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
+/**
+ * Server implementation with async gRPC metrics reporting
+ */
 public class ThroughputLatencyServer extends DefaultSingleRecoverable {
     
     private static final int METRICS_INTERVAL = 1;
@@ -29,12 +35,14 @@ public class ThroughputLatencyServer extends DefaultSingleRecoverable {
     private final int processId;
     private ServiceReplica replica;
     private TOMConfiguration config;
-    //每次发送的是1s内所有request的size和
     private long totalRequestSize;
-    
+    private long totalLatency;
+
     // gRPC related fields
     private final ManagedChannel channel;
     private final MetricsServiceGrpc.MetricsServiceBlockingStub blockingStub;
+    private final MetricsServiceGrpc.MetricsServiceStub asyncStub;
+    private final ScheduledExecutorService executorService;
     private volatile boolean isConnected = false;
 
     public static void main(String[] args) {
@@ -55,10 +63,13 @@ public class ThroughputLatencyServer extends DefaultSingleRecoverable {
             state[i] = (byte) i;
         }
 
+        // Initialize gRPC channel and stubs
         channel = ManagedChannelBuilder.forAddress("localhost", 32767)
                 .usePlaintext()
                 .build();
         blockingStub = MetricsServiceGrpc.newBlockingStub(channel);
+        asyncStub = MetricsServiceGrpc.newStub(channel);
+        executorService = Executors.newSingleThreadScheduledExecutor();
 
         this.replica = new ServiceReplica(processId, this, this);
         this.config = replica.getReplicaContext().getStaticConfiguration();
@@ -66,11 +77,16 @@ public class ThroughputLatencyServer extends DefaultSingleRecoverable {
         connectToTrainer();
         startTime = System.nanoTime();
 
+        // Add shutdown hook for cleanup
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             try {
+                executorService.shutdown();
+                if (!executorService.awaitTermination(5, TimeUnit.SECONDS)) {
+                    executorService.shutdownNow();
+                }
                 channel.shutdown().awaitTermination(5, TimeUnit.SECONDS);
             } catch (InterruptedException e) {
-                logger.error("Error during channel shutdown", e);
+                logger.error("Error during shutdown", e);
             }
         }));
     }
@@ -87,6 +103,55 @@ public class ThroughputLatencyServer extends DefaultSingleRecoverable {
                        response.getTimestamp());
         } catch (Exception e) {
             logger.error("Failed to connect to trainer", e);
+            executorService.schedule(this::connectToTrainer, 5, TimeUnit.SECONDS);
+        }
+    }
+
+    private void sendMetricsAsync(double throughput, long averageLatency, long numRequests, 
+                                long totalRequestSize, MessageContext msgCtx) {
+        if (!isConnected) {
+            return;
+        }
+
+        MetricsRequest request = MetricsRequest.newBuilder()
+                .addThroughput((int)throughput)
+                .addLatency((int)(averageLatency))
+                .addRequests((int)numRequests) 
+                .addRequestsSize((int)totalRequestSize)
+                .addBatchSize(config.getMaxBatchSize())
+                .addBatchTimeout(config.getBatchTimeout())
+                .addLeader(msgCtx != null ? msgCtx.getLeader() : -1)
+                .build();
+
+        StreamObserver<MetricsResponse> responseObserver = new StreamObserver<MetricsResponse>() {
+            @Override
+            public void onNext(MetricsResponse response) {
+                executorService.execute(() -> {
+                    updateConfigurations(response.getBatchSize(), response.getBatchTimeout());
+                });
+            }
+
+            @Override
+            public void onError(Throwable t) {
+                logger.error("Failed to send metrics to trainer", t);
+                isConnected = false;
+                executorService.schedule(() -> connectToTrainer(), 
+                    5, TimeUnit.SECONDS);
+            }
+
+            @Override
+            public void onCompleted() {
+                // Optional: Add any cleanup code here
+            }
+        };
+
+        try {
+            asyncStub.sendMetrics(request, responseObserver);
+        } catch (Exception e) {
+            logger.error("Failed to send async metrics request", e);
+            isConnected = false;
+            executorService.schedule(() -> connectToTrainer(),
+                5, TimeUnit.SECONDS);
         }
     }
 
@@ -107,16 +172,15 @@ public class ThroughputLatencyServer extends DefaultSingleRecoverable {
         numRequests++;
         senders.add(msgCtx.getSender());
         
-        // Method 1: Using command.length as request size, command.length = 1(op type, 1 byte) + 4(size of requests, 4 byte) + requestSize bytes
-        //totalRequestSize += command.length;
-        
-        // Method 2: Using actual request data size
         ByteBuffer buffer = ByteBuffer.wrap(command);
         Operation op = Operation.getOperation(buffer.get());
         if (op == Operation.PUT) {
             int requestSize = buffer.getInt();
             totalRequestSize += requestSize;
         }
+
+        long requestLatency = System.nanoTime() - msgCtx.receptionTime;
+        totalLatency += requestLatency;
         
         byte[] response = null;
         switch (op) {
@@ -136,23 +200,22 @@ public class ThroughputLatencyServer extends DefaultSingleRecoverable {
         numRequests++;
         senders.add(msgCtx.getSender());
         
-        // Method 1: Using command.length as request size
-        //totalRequestSize += command.length;
-        
-        // Method 2: Using actual request data size
         ByteBuffer buffer = ByteBuffer.wrap(command);
         Operation op = Operation.getOperation(buffer.get());
-        
-        //对于 GET 操作不增加 totalRequestSize，因为它没有携带实际数据
+
         if (op == Operation.GET) {
             int requestSize = buffer.getInt();
             totalRequestSize += requestSize;
         }
+
+        long requestLatency = System.nanoTime() - msgCtx.receptionTime;
+        totalLatency += requestLatency;
         
         byte[] response = null;
         if (op == Operation.GET) {
             response = state;
         }
+        
         printMeasurement(msgCtx);
         return response;
     }
@@ -162,36 +225,22 @@ public class ThroughputLatencyServer extends DefaultSingleRecoverable {
         double deltaTime = (currentTime - startTime) / 1_000_000_000.0;
         if ((int) (deltaTime / METRICS_INTERVAL) > 0) {
             long delta = currentTime - startTime;
-            double throughput = numRequests / deltaTime;
+            // double throughput = numRequests/deltaTime;
+            double throughput = numRequests;
+
             if (throughput > maxThroughput) {
                 maxThroughput = throughput;
             }
+
+            long averageLatency = numRequests > 0 ? totalLatency / numRequests : 0;
             
-            if (isConnected) {
-                try {
-                    MetricsRequest request = MetricsRequest.newBuilder()
-                            .addThroughput((int)throughput)
-                            .addLatency((int)(delta / numRequests))
-                            .addRequests((int)numRequests)
-                            .addRequestsSize((int)totalRequestSize)
-                            .addBatchSize(config.getMaxBatchSize())
-                            .addBatchTimeout(config.getBatchTimeout())
-                            .addLeader(msgCtx != null ? msgCtx.getLeader() : -1)
-                            .build();
-                    
-                    MetricsResponse response = blockingStub.sendMetrics(request);
-                    updateConfigurations(response.getBatchSize(), response.getBatchTimeout());
-                } catch (Exception e) {
-                    logger.error("Failed to send metrics to trainer", e);
-                    isConnected = false;
-                    connectToTrainer();
-                }
-            }
+            sendMetricsAsync(throughput, averageLatency, numRequests, totalRequestSize, msgCtx);
 
             logger.info("M:(clients[#]|requests[#]|delta[ns]|throughput[ops/s], max[ops/s])>({}|{}|{}|{}|{})",
                     senders.size(), numRequests, delta, throughput, maxThroughput);
             
             numRequests = 0;
+            totalLatency = 0;
             totalRequestSize = 0;
             startTime = currentTime;
             senders.clear();

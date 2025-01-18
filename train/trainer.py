@@ -31,7 +31,7 @@ old_state = []
 cnt = 0
 score = 0
 notify_counter = 0
-max_notify_count = 36
+max_notify_count = 3600000
 
 global model, scores, metrics
 model_path = "ppo_model_checkpoint.pth"
@@ -43,7 +43,7 @@ model_path = "ppo_model_checkpoint.pth"
 A_values = torch.linspace(100, 7000, 70).int()
 B_values = torch.linspace(100, 4000, 40).int() # BatchTimeout
 
-num_node = 1
+num_node = 4
 start_time, connected_clients, received_msg = 0, 0, 0
 all_clients_connected, all_received = threading.Condition(), threading.Condition()
 received_msg_lock = threading.Lock()
@@ -148,15 +148,6 @@ class PPO(nn.Module):
 
 class MetricsServiceServicer(monitor_pb2_grpc.MetricsServiceServicer):
     def SendMetrics(self, request, context):
-        # print("\nReceived metrics details:")
-        # print(f"Throughput List: {list(request.throughput)}")
-        # print(f"Latency List: {list(request.latency)}")
-        # print(f"Requests List: {list(request.requests)}")
-        # print(f"Request Size List: {list(request.requests_size)}")
-        # print(f"Batch Size List: {list(request.BatchSize)}")
-        # print(f"Batch Timeout List: {list(request.BatchTimeout)}")
-        # print(f"Leader List: {list(request.Leader)}")
-        # print("-------------------")
 
         global received_msg, num_node, requests, batchSize, batchTimeout, notify_counter
         with all_received:
@@ -181,8 +172,8 @@ class MetricsServiceServicer(monitor_pb2_grpc.MetricsServiceServicer):
                 all_received.notify_all()
         
         response = monitor_pb2.MetricsResponse(
-            BatchSize=batchSize,
-            BatchTimeout=batchTimeout
+            BatchSize=batchSize+1,
+            BatchTimeout=batchTimeout+1
         )
         return response
 
@@ -217,9 +208,9 @@ def handleMetrics(requests, length):
     for i in range(length):
         tmp_thr, tmp_lat, tmp_rqs, tmp_size, tmp_BS, tmp_BT, tmp_lead = [], [], [], [], [], [], []
 
-        # for j in range(4):
+        for j in range(4):
         # TODO 这里如果设置为4的话会报错显示index超出range，具体原因未知
-        for j in range(len(requests)):
+        # for j in range(len(requests)):
             tmp_thr.append(requests[j].throughput[i])
             tmp_lat.append(requests[j].latency[i] * requests[j].throughput[i])
             tmp_rqs.append(requests[j].requests[i])
