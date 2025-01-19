@@ -172,8 +172,8 @@ class MetricsServiceServicer(monitor_pb2_grpc.MetricsServiceServicer):
                 all_received.notify_all()
         
         response = monitor_pb2.MetricsResponse(
-            BatchSize=batchSize+1,
-            BatchTimeout=batchTimeout+1
+            BatchSize=batchSize,
+            BatchTimeout=batchTimeout
         )
         return response
 
